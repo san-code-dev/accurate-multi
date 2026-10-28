@@ -1,0 +1,21 @@
+{
+  "name": "accurate-multi-mcp",
+  "version": "1.0.0",
+  "description": "MCP server (read-only) multi-tenant untuk banyak database Accurate Online",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "test": "node --test",
+    "start:stdio": "node --env-file=.env server.js --stdio",
+    "start": "node --env-file=.env server.js",
+    "dev": "node --watch --env-file=.env server.js"
+  },
+  "engines": {
+    "node": ">=20.6"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "express": "^4.19.2",
+    "zod": "^3.23.8"
+  }
+}

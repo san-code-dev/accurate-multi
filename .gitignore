@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+/.pnp
+.pnp.js
+
+# Environment variables (sangat penting untuk diabaikan agar kredensial rahasia tidak ter-commit)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Tetap sertakan contoh env jika ada
+!.env.example
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Optional npm cache directory
+.npm
+
+# Output build / kompilasi (jika ada)
+dist/
+build/
+out/
+
+# Editor & IDE configs
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.suo
+*.ntvsopt
+*.njsproj
+*.sln
+*.sw?
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Hasil paket ekstensi Claude Desktop
+extension/dist/
+
+# Daftar tenant berisi API token & secret Accurate (JANGAN di-commit)
+config/tenants.json

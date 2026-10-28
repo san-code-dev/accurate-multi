@@ -1,0 +1,14 @@
+# Kredensial dan file yang tidak dibutuhkan image
+.env
+.env.*
+!.env.example
+node_modules
+.git
+.gitignore
+extension
+*.test.js
+README.md
+Dockerfile
+docker-compose.yml
+.dockerignore
+config

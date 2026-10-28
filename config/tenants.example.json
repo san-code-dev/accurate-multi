@@ -1,0 +1,19 @@
+{
+  "tenants": [
+    {
+      "id": "pt-contoh",
+      "name": "PT Contoh Sejahtera",
+      "description": "Database utama (opsional)",
+      "token": "API_TOKEN_ACCURATE_DATABASE_INI",
+      "secret": "SIGNATURE_SECRET_APLIKASI",
+      "sigEncoding": "base64",
+      "enabled": true
+    },
+    {
+      "id": "cv-cabang",
+      "name": "CV Cabang Makmur",
+      "token": "API_TOKEN_ACCURATE_DATABASE_LAIN",
+      "secret": "SIGNATURE_SECRET_APLIKASI"
+    }
+  ]
+}

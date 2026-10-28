@@ -1,0 +1,22 @@
+# Jalankan: docker compose up -d --build
+# restart: unless-stopped -> otomatis jalan lagi saat komputer/Docker hidup kembali,
+# kecuali container dihentikan manual (docker compose stop / down).
+services:
+  accurate-multi-mcp:
+    build: .
+    image: accurate-multi-mcp:latest
+    container_name: accurate-multi-mcp
+    restart: unless-stopped
+    # format raw: nilai dibaca apa adanya. Tanpa ini, tanda $ (mis. pada MCP_AUTH_TOKEN) dianggap variabel dan nilainya terpotong.
+    env_file:
+      - path: .env
+        format: raw
+    environment:
+      HOST: 0.0.0.0
+      PORT: ${PORT:-3031}
+      TENANTS_FILE: /app/config/tenants.json
+    # Folder (bukan file tunggal) dipasang read-only, agar perubahan tenants.json langsung terbaca tanpa restart.
+    volumes:
+      - ./config:/app/config:ro
+    ports:
+      - "${PORT:-3031}:${PORT:-3031}"
