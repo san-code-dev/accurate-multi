@@ -2,9 +2,9 @@
   "manifest_version": "0.2",
   "name": "accurate-multi",
   "display_name": "Accurate Multi-Tenant (Kantor)",
-  "version": "1.0.0",
-  "description": "Akses BACA-SAJA ke beberapa database Accurate Online lewat MCP server kantor.",
-  "long_description": "Menghubungkan Claude Desktop ke MCP server Accurate multi-tenant yang berjalan di jaringan kantor. Ekstensi ini hanya penghubung: tidak berisi kode atau token Accurate, dan server hanya mengizinkan membaca data (tidak bisa menambah, mengubah, atau menghapus).",
+  "version": "2.0.0",
+  "description": "Akses baca dan tulis (tambah/ubah) ke beberapa database Accurate Online lewat MCP server kantor.",
+  "long_description": "Menghubungkan Claude Desktop ke MCP server Accurate multi-tenant di jaringan kantor. Ekstensi ini hanya penghubung: tidak berisi kode atau token Accurate. Semua tenant bisa dibaca; tenant yang diizinkan admin juga bisa ditambah/diubah datanya. Penghapusan data tidak pernah diizinkan.",
   "author": {
     "name": "BoneDeath"
   },
@@ -38,6 +38,10 @@
     {
       "name": "accurate_get",
       "description": "Ambil data dari endpoint baca Accurate."
+    },
+    {
+      "name": "accurate_write",
+      "description": "Tambah/ubah data di tenant yang diizinkan menulis (tidak bisa menghapus)."
     }
   ],
   "user_config": {

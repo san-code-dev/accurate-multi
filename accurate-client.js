@@ -1,11 +1,14 @@
-// Klien HTTP Accurate Online (API Token). Dirancang READ-ONLY di level paling bawah:
-//  - tidak ada parameter "method": semua request data adalah HTTP GET ke /accurate/api/*,
-//  - satu-satunya POST adalah api-token.do (cek token & cari host), URL-nya tetap dan tanpa body,
+// Klien HTTP Accurate Online (API Token), satu instans per tenant. Aturan di level paling bawah:
+//  - baca: HTTP GET ke /accurate/api/*,
+//  - tulis (tambah/ubah): HTTP POST JSON ke /accurate/api/*, HANYA bila klien dibuat dengan allowWrite = true
+//    dan path lolos pengaman tulis; tidak pernah diulang otomatis (agar tidak tercipta data ganda),
+//  - HTTP DELETE/PUT/PATCH tidak pernah dikirim,
+//  - POST lain hanya api-token.do (cek token & cari host), URL-nya tetap dan tanpa body,
 //  - semua URL (termasuk host hasil api-token.do dan target redirect 308) wajib berada di domain accurate.id,
-//  - setiap path dicek bentuknya oleh readonly-guard,
+//  - setiap path dicek bentuknya oleh guard.js,
 //  - fungsi request internal tidak diekspor, sehingga kode lain tidak bisa mengirim request selain di atas.
 import crypto from "node:crypto";
-import { assertSafeShape } from "./readonly-guard.js";
+import { assertSafeShape } from "./guard.js";
 
 const RETRY_STATUS = new Set([429, 502, 503, 504]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -23,6 +26,7 @@ export function createAccurateClient(opts) {
     hostTtlMs = 12 * 60 * 60 * 1000,
     retries = 3, // hanya untuk GET (aman diulang): 429/502/503/504 dan gangguan jaringan
     retryBaseMs = 1000,
+    allowWrite = false,
   } = opts;
   if (!token || !secret) throw new Error("token dan secret wajib diisi");
 
@@ -66,10 +70,12 @@ export function createAccurateClient(opts) {
 
   let cachedHost = null;
 
-  // Internal. method hanya bisa "GET", atau "POST" khusus untuk tokenCheckUrl (dicek ulang di sini).
-  async function send(url, method, query = {}) {
-    if (method !== "GET" && !(method === "POST" && url === tokenCheckUrl)) {
-      throw new Error("Diblokir: hanya HTTP GET yang diizinkan (server read-only).");
+  // Internal. method hanya "GET", "POST" ke tokenCheckUrl, atau "POST" tulis (body JSON) bila allowWrite.
+  async function send(url, method, query = {}, body) {
+    const isTokenCheck = method === "POST" && url === tokenCheckUrl && body === undefined;
+    const isWrite = method === "POST" && body !== undefined;
+    if (!(method === "GET" && body === undefined) && !isTokenCheck && !(isWrite && allowWrite)) {
+      throw new Error(isWrite ? "Diblokir: tulis tidak diizinkan untuk tenant ini." : "Diblokir: metode HTTP tidak diizinkan.");
     }
     let target = assertAccurateUrl(url);
     for (const [k, v] of Object.entries(query)) target.searchParams.set(String(k), String(v));
@@ -82,7 +88,8 @@ export function createAccurateClient(opts) {
           for (let hop = 0; hop < 3; hop++) {
             res = await fetch(target, {
               method,
-              headers: authHeaders(), // ditandatangani ulang tiap percobaan
+              headers: isWrite ? { ...authHeaders(), "Content-Type": "application/json" } : authHeaders(), // ditandatangani ulang tiap percobaan
+              ...(isWrite ? { body: JSON.stringify(body) } : {}),
               redirect: "manual",
               signal: AbortSignal.timeout(timeoutMs),
             });
@@ -110,19 +117,19 @@ export function createAccurateClient(opts) {
         }
 
         const text = await res.text();
-        let body;
+        let parsed;
         try {
-          body = JSON.parse(text);
+          parsed = JSON.parse(text);
         } catch {
           throw new Error(`Respons bukan JSON (HTTP ${res.status}): ${text.slice(0, 300)}`);
         }
-        if (!res.ok || body?.s === false) {
+        if (!res.ok || parsed?.s === false) {
           // Accurate kadang menyebut ulang token di pesan error (mis. "Invalid access token: aat...."); sembunyikan
           // agar token/secret tidak pernah ikut terkirim ke AI atau log.
-          const detail = redact(Array.isArray(body?.d) ? body.d.join("; ") : JSON.stringify(body).slice(0, 300));
+          const detail = redact(Array.isArray(parsed?.d) ? parsed.d.join("; ") : JSON.stringify(parsed).slice(0, 300));
           throw new Error(`Accurate error (HTTP ${res.status}): ${detail}`);
         }
-        return body;
+        return parsed;
       }
     });
   }
@@ -148,12 +155,21 @@ export function createAccurateClient(opts) {
     return cachedHost;
   }
 
-  /** path relatif, mis. "glaccount/list.do". Selalu GET. */
+  /** Baca. path relatif, mis. "glaccount/list.do". Selalu GET. */
   async function api(path, query = {}) {
-    assertSafeShape(path);
+    assertSafeShape(path, "read");
     const { host } = await getHost();
     return send(`${host}/accurate/api/${path}`, "GET", query);
   }
 
-  return { getHost, api };
+  /** Tulis (tambah/ubah). path relatif, mis. "vendor/save.do"; body objek JSON. Tidak pernah diulang otomatis. */
+  async function write(path, body) {
+    if (!allowWrite) throw new Error("Diblokir: tulis tidak diizinkan untuk tenant ini.");
+    assertSafeShape(path, "write");
+    if (body === null || typeof body !== "object") throw new Error("Isi tulis harus berupa objek JSON.");
+    const { host } = await getHost();
+    return send(`${host}/accurate/api/${path}`, "POST", {}, body);
+  }
+
+  return { getHost, api, write, allowWrite };
 }

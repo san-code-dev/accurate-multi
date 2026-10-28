@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  buildCatalog, assertAllowed, normalizePath, isSafeShape, sanitizeQuery, searchCatalog, listModules, describeEndpoint,
-} from "./readonly-guard.js";
+  buildCatalog, assertAllowed, normalizePath, isSafeShape, sanitizeQuery, sanitizeBody, searchCatalog, listModules, describeEndpoint,
+} from "./guard.js";
 
 const DATA = [{ url: "https://{cloudServerCode}.accurate.id/accurate" }];
 const BASE = [{ url: "https://account.accurate.id" }];
@@ -14,7 +14,17 @@ const spec = {
     "/api/glaccount/list.do": { get: op({ parameters: [{ name: "sp.page", in: "query", schema: { type: "integer" } }, { name: "X-Session-ID", in: "header" }] }) },
     "/api/glaccount/detail.do": { get: op({ parameters: [{ name: "id", in: "query", required: true, schema: { type: "integer" } }] }) },
     "/api/glaccount/get-pl-account-amount.do": { get: op() },
-    "/api/glaccount/save.do": { post: op({ security: [{ default: ["glaccount_save"] }] }) },
+    "/api/glaccount/save.do": { post: op({ security: [{ default: ["glaccount_save"] }], requestBody: { content: { "application/json": { schema: {
+      required: ["name"], properties: { name: { type: "string", description: "Nama akun" }, id: { type: "integer" },
+        detail: { type: "array", items: { properties: { amount: { type: "number" } } } } } } } } } }) },
+    // POST scope tulis tetapi nama operasi menghapus -> ditolak
+    "/api/glaccount/void.do": { post: op({ security: [{ default: ["glaccount_save"] }] }) },
+    // POST dengan campuran scope simpan + hapus -> ditolak
+    "/api/glaccount/save-and-delete.do": { post: op({ security: [{ default: ["glaccount_save", "glaccount_delete"] }] }) },
+    // DELETE ber-scope save (ada di spesifikasi asli) -> metode DELETE tidak pernah diizinkan
+    "/api/sales-invoice/delete.do": { delete: op({ tags: ["/api/sales-invoice"], security: [{ default: ["sales_invoice_save"] }] }) },
+    // POST tulis di server dasar -> ditolak
+    "/api/base-save.do": { post: { tags: ["/api"], servers: BASE, security: [{ default: ["x_save"] }] } },
     "/api/glaccount/delete.do": { delete: op({ security: [{ default: ["glaccount_delete"] }] }) },
     "/api/glaccount/bulk-save.do": { post: op() },
     // GET tetapi butuh scope tulis -> harus ditolak
@@ -31,17 +41,51 @@ const spec = {
 };
 const catalog = buildCatalog(spec);
 
-test("katalog hanya berisi endpoint baca yang sah", () => {
-  assert.deepEqual([...catalog.keys()].sort(), [
-    "glaccount/detail.do", "glaccount/get-pl-account-amount.do", "glaccount/list.do", "sales-invoice/list.do",
-  ]);
+test("katalog: baca = GET *_view, tulis = POST *_save saja", () => {
+  const byKind = (k) => [...catalog.values()].filter((e) => e.kind === k).map((e) => e.path).sort();
+  assert.deepEqual(byKind("read"), ["glaccount/detail.do", "glaccount/get-pl-account-amount.do", "glaccount/list.do", "sales-invoice/list.do"]);
+  assert.deepEqual(byKind("write"), ["glaccount/save.do"]);
+  assert.equal(catalog.get("glaccount/save.do").method, "POST");
 });
 
-test("endpoint tulis, scope tulis, tanpa scope, nama berbahaya, dan server dasar ditolak", () => {
+test("baca: endpoint tulis, scope tulis, tanpa scope, nama berbahaya, dan server dasar ditolak", () => {
   for (const p of ["glaccount/save.do", "glaccount/delete.do", "glaccount/bulk-save.do", "glaccount/sneaky-read.do",
     "glaccount/no-scope.do", "sales-invoice/approve.do", "webhook-renew.do", "db-list.do"]) {
-    assert.throws(() => assertAllowed(p, catalog), /Diblokir/, p);
+    assert.throws(() => assertAllowed(p, catalog, "read"), /Diblokir/, p);
   }
+});
+
+test("tulis: hanya POST *_save; hapus, void, scope campuran, DELETE, server dasar, dan endpoint baca ditolak", () => {
+  assert.equal(assertAllowed("/api/glaccount/save.do", catalog, "write"), "glaccount/save.do");
+  for (const p of ["glaccount/delete.do", "glaccount/void.do", "glaccount/save-and-delete.do", "sales-invoice/delete.do",
+    "base-save.do", "glaccount/bulk-save.do", "glaccount/list.do", "../save.do"]) {
+    assert.throws(() => assertAllowed(p, catalog, "write"), /Diblokir/, p);
+  }
+  assert.equal(isSafeShape("vendor/save.do", "write"), true);
+  assert.equal(isSafeShape("vendor/delete.do", "write"), false);
+  assert.equal(isSafeShape("vendor/remove-item.do", "write"), false);
+});
+
+test("sanitizeBody: objek saja, tolak hapus baris, kunci berbahaya, terlalu besar/dalam", () => {
+  assert.deepEqual(sanitizeBody({ name: "PT X", detailItem: [{ itemNo: "A", quantity: 2 }] }), { name: "PT X", detailItem: [{ itemNo: "A", quantity: 2 }] });
+  assert.throws(() => sanitizeBody([1]), /objek JSON/);
+  assert.throws(() => sanitizeBody("x"), /objek JSON/);
+  assert.throws(() => sanitizeBody({ detailItem: [{ id: 5, _status: "delete" }] }), /penghapusan .*detailItem\[0\]\._status/);
+  assert.throws(() => sanitizeBody({ detailItem: [{ id: 5, _status: "DELETE" }] }), /penghapusan/);
+  assert.throws(() => sanitizeBody(JSON.parse('{"a":{"__proto__":{"x":1}}}')), /tidak diizinkan/);
+  assert.throws(() => sanitizeBody({ _method: "DELETE" }), /tidak diizinkan/);
+  let deep = { v: 1 }; for (let i = 0; i < 10; i++) deep = { d: deep };
+  assert.throws(() => sanitizeBody(deep), /bertingkat/);
+  assert.throws(() => sanitizeBody({ s: "x".repeat(300 * 1024) }), /terlalu besar/);
+});
+
+test("deskripsi endpoint tulis memuat field isi beserta field wajib", () => {
+  const d = describeEndpoint(catalog.get("glaccount/save.do"));
+  assert.equal(d.jenis, "tulis");
+  assert.deepEqual(d.isi.map((f) => [f.nama, f.wajib]), [["name", true], ["id", false], ["detail", false]]);
+  assert.deepEqual(d.isi[2].isi.map((f) => f.nama), ["amount"]);
+  const s = searchCatalog(catalog, "akun", 15, "write");
+  assert.deepEqual(s.hasil.map((h) => [h.path, h.jenis, h.isi_wajib]), [["glaccount/save.do", "tulis", ["name"]]]);
 });
 
 test("normalisasi path: /api/, api/, atau tanpa awalan", () => {

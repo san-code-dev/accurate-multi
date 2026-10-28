@@ -1,7 +1,9 @@
 // Daftar tenant (satu tenant = satu database Accurate = satu API token + signature secret).
-// Dibaca dari file JSON dan dimuat ulang otomatis bila file berubah (dicek per permintaan lewat waktu ubah file,
-// sehingga juga bekerja di dalam Docker). Bila file baru tidak valid, konfigurasi lama yang valid tetap dipakai.
+// Disimpan di file JSON, dikelola lewat halaman admin atau diedit manual. File dimuat ulang otomatis bila berubah
+// (dicek per permintaan lewat waktu ubah file, sehingga juga bekerja di dalam Docker). Bila file baru tidak valid,
+// konfigurasi lama yang valid tetap dipakai. Penyimpanan dari admin ditulis atomik (file sementara + rename).
 import fs from "node:fs";
+import path from "node:path";
 import crypto from "node:crypto";
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -32,11 +34,20 @@ export function parseTenants(json) {
       secret,
       sigEncoding,
       enabled: t.enabled !== false,
+      allowWrite: t.allowWrite === true, // tulis (tambah/ubah) harus diaktifkan eksplisit
     };
   });
 }
 
-const fingerprint = (t) => crypto.createHash("sha256").update(`${t.token}\u0000${t.secret}\u0000${t.sigEncoding}`).digest("hex");
+const fingerprint = (t) =>
+  crypto.createHash("sha256").update(`${t.token}\u0000${t.secret}\u0000${t.sigEncoding}\u0000${t.allowWrite}`).digest("hex");
+
+/** Tampilkan hanya 4 karakter terakhir sebuah rahasia. */
+export const mask = (v) => (v ? `••••${String(v).slice(-4)}` : "");
+
+const toStored = ({ id, name, description, token, secret, sigEncoding, enabled, allowWrite }) => ({
+  id, name, ...(description ? { description } : {}), token, secret, sigEncoding, enabled, allowWrite,
+});
 
 /**
  * Registry tenant dengan muat-ulang otomatis.
@@ -72,9 +83,64 @@ export function createTenantRegistry({ file, createClient, log = console.error }
     return [...state.tenants.values()].filter((t) => t.enabled);
   }
 
-  /** Daftar tenant tanpa kredensial. */
+  /** Daftar tenant aktif tanpa kredensial (untuk AI). */
   function list() {
-    return active().map(({ id, name, description }) => ({ id, name, ...(description ? { description } : {}) }));
+    return active().map(({ id, name, description, allowWrite }) => ({ id, name, ...(description ? { description } : {}), boleh_tulis: allowWrite }));
+  }
+
+  /** Semua tenant (termasuk nonaktif) untuk halaman admin; token/secret disamarkan. */
+  function adminList() {
+    reload();
+    return [...state.tenants.values()].map((t) => ({
+      id: t.id, name: t.name, description: t.description ?? "", sigEncoding: t.sigEncoding,
+      enabled: t.enabled, allowWrite: t.allowWrite, token: mask(t.token), secret: mask(t.secret),
+    }));
+  }
+
+  function persist(list) {
+    const dir = path.dirname(path.resolve(file));
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = path.join(dir, `.tenants-${process.pid}-${Date.now()}.tmp`);
+    fs.writeFileSync(tmp, JSON.stringify({ tenants: list.map(toStored) }, null, 2) + "\n", { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    state.mtimeMs = -1; // paksa muat ulang
+    reload();
+  }
+
+  /**
+   * Tambah atau ubah tenant dari halaman admin. originalId = id lama (bila mengubah, boleh ganti id).
+   * Saat mengubah, token/secret kosong berarti "tetap pakai yang lama".
+   */
+  function save(input, originalId) {
+    reload();
+    const current = [...state.tenants.values()];
+    const old = originalId ? current.find((t) => t.id === originalId) : undefined;
+    if (originalId && !old) throw new Error(`Tenant '${originalId}' tidak ditemukan.`);
+    const merged = {
+      ...input,
+      token: String(input.token ?? "").trim() || old?.token || "",
+      secret: String(input.secret ?? "").trim() || old?.secret || "",
+    };
+    const [valid] = parseTenants({ tenants: [merged] });
+    if (current.some((t) => t.id === valid.id && t.id !== originalId)) throw new Error(`id tenant '${valid.id}' sudah dipakai.`);
+    const next = old ? current.map((t) => (t.id === originalId ? valid : t)) : [...current, valid];
+    persist(next);
+    return valid.id;
+  }
+
+  function remove(id) {
+    reload();
+    const current = [...state.tenants.values()];
+    if (!current.some((t) => t.id === id)) throw new Error(`Tenant '${id}' tidak ditemukan.`);
+    persist(current.filter((t) => t.id !== id));
+  }
+
+  /** Klien untuk uji koneksi dari admin (termasuk tenant nonaktif). */
+  function clientFor(id) {
+    reload();
+    const t = state.tenants.get(id);
+    if (!t) throw new Error(`Tenant '${id}' tidak ditemukan.`);
+    return { tenant: t, client: createClient(t) };
   }
 
   /** Ambil tenant + klien Accurate-nya. Tanpa id: boleh hanya bila tepat ada satu tenant aktif. */
@@ -100,5 +166,5 @@ export function createTenantRegistry({ file, createClient, log = console.error }
     return { tenant, client: entry.client };
   }
 
-  return { list, resolve, status: () => (reload(), { jumlah: active().length, error: state.error }) };
+  return { list, adminList, save, remove, clientFor, resolve, status: () => (reload(), { jumlah: active().length, error: state.error }) };
 }

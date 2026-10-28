@@ -11,4 +11,5 @@ README.md
 Dockerfile
 docker-compose.yml
 .dockerignore
-config
+data
+tenants.example.json

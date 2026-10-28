@@ -26,6 +26,14 @@ function startMock({ evilHost = false } = {}) {
       return res.end(JSON.stringify({ s: true, d: [{ id: 9 }] }));
     }
     if (req.url.startsWith("/accurate/api/down/list.do")) { res.statusCode = 503; return res.end("{}"); }
+    if (req.url.startsWith("/accurate/api/vendor/save.do")) {
+      let b = ""; req.on("data", (c) => (b += c));
+      return req.on("end", () => {
+        seen[seen.length - 1].body = b; seen[seen.length - 1].type = req.headers["content-type"];
+        if (b.includes("GAGAL503")) { res.statusCode = 503; return res.end("{}"); }
+        res.end(JSON.stringify({ s: true, d: ["Data berhasil disimpan"], r: { id: 77, number: "V.00077" } }));
+      });
+    }
     if (req.url.startsWith("/accurate/api/glaccount/list.do")) return res.end(JSON.stringify({ s: true, d: [{ id: 1 }] }));
     if (req.url.startsWith("/accurate/api/leak/list.do")) { res.statusCode = 401; return res.end(JSON.stringify({ error: "invalid_token", error_description: `Invalid access token: ${String(req.headers.authorization).slice(7)}` })); }
     if (req.url.startsWith("/accurate/api/err/list.do")) { res.statusCode = 400; return res.end(JSON.stringify({ s: false, d: ["Header X-Api-Signature invalid"] })); }
@@ -72,7 +80,9 @@ test("klien tidak punya jalur kirim selain GET data + POST cek token", async () 
   const { srv, seen, port } = await startMock();
   try {
     const c = make(port);
-    assert.deepEqual(Object.keys(c).sort(), ["api", "getHost"], "fungsi request mentah tidak boleh diekspor");
+    assert.deepEqual(Object.keys(c).sort(), ["allowWrite", "api", "getHost", "write"], "fungsi request mentah tidak boleh diekspor");
+    assert.equal(c.allowWrite, false);
+    await assert.rejects(() => c.write("vendor/save.do", { name: "x" }), /tulis tidak diizinkan/);
     await c.getHost(true);
     await c.api("glaccount/list.do");
     assert.deepEqual(seen.map((s) => s.method), ["POST", "GET"]);
@@ -138,5 +148,30 @@ test("token yang disebut ulang di pesan error Accurate disembunyikan", async () 
       assert.ok(!e.message.includes("RAHASIA"), "token tidak boleh muncul di pesan error");
       return true;
     });
+  } finally { srv.close(); }
+});
+
+test("tulis: POST JSON hanya bila allowWrite, path tulis divalidasi, tidak pernah diulang otomatis", async () => {
+  const { srv, seen, port } = await startMock();
+  try {
+    const c = createAccurateClient({
+      token: "tok", secret: "s3cret", accountApi: `http://127.0.0.1:${port}/api`,
+      allowedHostSuffixes: ["127.0.0.1"], allowInsecureHttp: true, retryBaseMs: 5, allowWrite: true,
+    });
+    const r = await c.write("vendor/save.do", { name: "PT Uji" });
+    assert.deepEqual(r.r, { id: 77, number: "V.00077" });
+    const w = seen.find((s) => s.url.includes("vendor/save.do"));
+    assert.equal(w.method, "POST");
+    assert.equal(w.type, "application/json");
+    assert.deepEqual(JSON.parse(w.body), { name: "PT Uji" });
+    assert.ok(w.sigOK);
+
+    for (const p of ["vendor/delete.do", "vendor/void.do", "../x/save.do"]) {
+      await assert.rejects(() => c.write(p, {}), /Diblokir/, p);
+    }
+    const before = seen.filter((s) => s.url.includes("vendor/save.do")).length;
+    await assert.rejects(() => c.write("vendor/save.do", { name: "GAGAL503" }), /HTTP 503/);
+    assert.equal(seen.filter((s) => s.url.includes("vendor/save.do")).length, before + 1, "POST gagal tidak boleh diulang");
+    assert.ok(seen.every((s) => ["GET", "POST"].includes(s.method)), "DELETE/PUT/PATCH tidak pernah dikirim");
   } finally { srv.close(); }
 });

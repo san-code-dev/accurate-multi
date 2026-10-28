@@ -14,9 +14,12 @@ import {
   listModules,
   searchCatalog,
   describeEndpoint,
-} from "./readonly-guard.js";
+  sanitizeBody,
+} from "./guard.js";
 import { collectRows } from "./fetch-all.js";
 import { createTenantRegistry } from "./tenants.js";
+import { createAudit } from "./audit.js";
+import { createAdminApp } from "./admin.js";
 
 // ---------------------------------------------------------------------------
 // Konfigurasi
@@ -26,7 +29,11 @@ import { createTenantRegistry } from "./tenants.js";
 const STDIO = process.argv.includes("--stdio");
 
 const {
-  TENANTS_FILE = "config/tenants.json",
+  TENANTS_FILE = "data/tenants.json",
+  AUDIT_FILE = "data/audit.log",
+  ADMIN_PASSWORD,
+  ADMIN_PORT = "3032",
+  ADMIN_HOST = "127.0.0.1",
   ACCURATE_SPEC_URL = "https://account.accurate.id/open-api/json.do",
   ACCURATE_SPEC_FILE,
   MCP_AUTH_TOKEN,
@@ -45,8 +52,9 @@ const SPEC_TTL_MS = 24 * 60 * 60 * 1000;
 // Satu klien Accurate per tenant (masing-masing punya batas paralel sendiri, sesuai kuota Accurate per token).
 const tenants = createTenantRegistry({
   file: TENANTS_FILE,
-  createClient: (t) => createAccurateClient({ token: t.token, secret: t.secret, sigEncoding: t.sigEncoding }),
+  createClient: (t) => createAccurateClient({ token: t.token, secret: t.secret, sigEncoding: t.sigEncoding, allowWrite: t.allowWrite }),
 });
+const audit = createAudit(AUDIT_FILE);
 {
   const st = tenants.status();
   if (st.error) console.error(st.error);
@@ -110,52 +118,52 @@ const querySchema = z.record(scalar).default({});
 const tenantSchema = z.string().max(40).optional().describe("id tenant dari list_tenants (wajib bila ada lebih dari satu tenant)");
 
 const INSTRUCTIONS = `
-Server ini memberi akses BACA-SAJA ke data BEBERAPA database Accurate Online (tenant). Satu tenant = satu database.
-Tidak ada tool untuk menambah, mengubah, atau menghapus data, dan hal itu memang tidak mungkin dilakukan lewat server ini.
-Jika pengguna meminta menulis/mengubah/menghapus data di Accurate, tolak dan jelaskan bahwa server ini read-only.
-
-Server ini hanya PENGHUBUNG: ia mengambil data apa adanya dan memastikan data itu utuh. Server TIDAK menghitung apa pun;
-semua perhitungan (total, rekap, laba rugi, selisih, persentase) adalah tugas Anda.
+Server ini memberi akses ke BEBERAPA database Accurate Online (tenant). Satu tenant = satu database.
+Semua tenant bisa DIBACA. Tenant dengan boleh_tulis = true juga bisa DITULIS (tambah/ubah) lewat accurate_write.
+Penghapusan data TIDAK PERNAH bisa dilakukan lewat server ini; bila diminta menghapus, tolak dan sarankan dilakukan di Accurate.
 
 Tenant:
-- Panggil list_tenants lebih dulu untuk melihat database yang tersedia. Semua tool data membutuhkan parameter "tenant"
-  (id dari list_tenants), kecuali hanya ada satu tenant.
+- Panggil list_tenants lebih dulu. Semua tool data membutuhkan parameter "tenant" (id dari list_tenants), kecuali hanya ada satu tenant.
 - Bila pengguna tidak menyebut perusahaan/database dan ada lebih dari satu tenant, TANYAKAN tenant mana; jangan menebak.
-- Jangan pernah mencampur data antar tenant dalam satu total, kecuali pengguna memintanya (mis. konsolidasi); dalam hal itu
-  tampilkan angka per tenant lalu totalnya, dan sebutkan nama tenant di setiap tabel/laporan.
+- Jangan mencampur data antar tenant dalam satu total kecuali diminta (konsolidasi); tampilkan per tenant lalu totalnya.
 - id dokumen, pelanggan, vendor, barang, dan akun hanya berlaku di tenant asalnya.
 
-Cara bekerja:
-1. Cari endpoint dengan search_endpoints (kata kunci bebas, mis. "faktur pembelian", "stok barang", "akun perkiraan").
-   Tanpa argumen: daftar modul. Dengan argumen path: parameter lengkap endpoint itu.
-2. Ambil data dengan accurate_get. Selalu gunakan "fields" berisi hanya kolom yang dibutuhkan (plus "id") agar ringkas.
-   Untuk daftar lebih dari 100 baris gunakan all_pages=true.
-3. Bila respons ditolak karena terlalu besar, pecah per periode (mis. per bulan) dan gabungkan hasilnya.
-4. Untuk menjumlahkan banyak angka, hitung DENGAN KODE bila Anda bisa menjalankan kode. Jangan menjumlahkan
-   puluhan angka atau lebih di kepala; bila tidak bisa menjalankan kode, katakan bahwa total berisiko salah.
-5. Format tanggal Accurate: dd/MM/yyyy. Filter biasanya filter.<field>.op / filter.<field>.val (lihat parameter endpoint).
+Membaca:
+1. Cari endpoint dengan search_endpoints (jenis "baca"). Dengan argumen path: parameter lengkapnya.
+2. Ambil data dengan accurate_get. Gunakan "fields" seperlunya (plus "id"). Untuk daftar >100 baris gunakan all_pages=true.
+3. Bila respons ditolak karena terlalu besar, pecah per periode lalu gabungkan.
+4. Hitung banyak angka DENGAN KODE bila bisa; jangan di kepala. Format tanggal Accurate: dd/MM/yyyy.
+
+Menulis (tambah/ubah) - data keuangan asli, tidak bisa dibatalkan otomatis:
+1. Hanya bila pengguna jelas meminta perubahan itu, dan hanya di tenant yang ia sebut.
+2. Cari endpoint dengan search_endpoints (jenis "tulis"), lalu lihat field-nya dengan argumen path.
+3. Untuk MENGUBAH data, ambil dulu datanya (accurate_get detail.do) agar tahu id dan nilai saat ini; sertakan "id" di body.
+   Tanpa "id", Accurate MEMBUAT data baru.
+4. SEBELUM memanggil accurate_write, tampilkan ke pengguna: tenant, endpoint, dan isi yang akan dikirim (tabel ringkas),
+   lalu minta konfirmasi eksplisit ("ya"/"lanjut"). Baru panggil accurate_write dengan dikonfirmasi = true.
+5. Satu panggilan untuk satu perubahan yang sudah disetujui. Jangan mengulang panggilan yang gagal tanpa bertanya;
+   periksa dulu dengan accurate_get apakah data sudah tersimpan, agar tidak tercipta data ganda.
+6. Setelah berhasil, laporkan id/nomor dokumen yang dikembalikan Accurate.
 
 Aturan keutuhan data:
 - Sertakan "id" di fields agar duplikat bisa terdeteksi.
-- Jangan pernah menghitung total dari data parsial (ada PERINGATAN, CATATAN, atau lengkap = false).
-- Selalu cocokkan jumlah baris yang Anda hitung dengan "baris_menurut_accurate" dan sebutkan ke pengguna.
+- Jangan menghitung total dari data parsial (ada PERINGATAN, CATATAN, atau lengkap = false).
+- Cocokkan jumlah baris yang dihitung dengan "baris_menurut_accurate" dan sebutkan ke pengguna.
 - Perhatikan dokumen batal/draft dan mata uang asing (field status/currency/rate) sebelum menjumlahkan.
 
 Laba rugi: accurate_get path "glaccount/get-pl-account-amount.do", query {"fromDate":"01/01/2021","toDate":"31/12/2021"}.
-- Jumlahkan HANYA baris dengan isParent = false (akun induk sudah berisi jumlah anak-anaknya; kalau ikut dijumlah, angka ganda).
-- Kelompokkan per accountType: REVENUE, COST_OF_GOOD_SOLD, EXPENSE, OTHER_INCOME, OTHER_EXPENSE.
-  Laba kotor = REVENUE - COST_OF_GOOD_SOLD; laba usaha = laba kotor - EXPENSE;
+- Jumlahkan HANYA baris dengan isParent = false. Kelompokkan per accountType: REVENUE, COST_OF_GOOD_SOLD, EXPENSE,
+  OTHER_INCOME, OTHER_EXPENSE. Laba kotor = REVENUE - COST_OF_GOOD_SOLD; laba usaha = laba kotor - EXPENSE;
   laba bersih = laba usaha + OTHER_INCOME - OTHER_EXPENSE.
-- Tanda angka untuk pendapatan dan HPP sudah terbukti sesuai asumsi, tetapi untuk beban operasional, retur/diskon penjualan,
-  dan pos di luar usaha BELUM diverifikasi terhadap laporan resmi Accurate. Katakan itu kepada pengguna dan sarankan
-  mencocokkan laba bersih dengan laporan Laba Rugi di Accurate.
+- Tanda angka beban operasional, retur/diskon penjualan, dan pos di luar usaha BELUM diverifikasi terhadap laporan resmi
+  Accurate. Katakan itu dan sarankan mencocokkan laba bersih dengan laporan Laba Rugi di Accurate.
 `.trim();
 
 // ---------------------------------------------------------------------------
 // Definisi MCP server + tools
 // ---------------------------------------------------------------------------
 function createMcpServer() {
-  const server = new McpServer({ name: "accurate-multi-mcp", version: "1.0.0" }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "accurate-multi-mcp", version: "2.0.0" }, { instructions: INSTRUCTIONS });
 
   server.registerTool(
     "list_tenants",
@@ -200,26 +208,35 @@ function createMcpServer() {
     {
       title: "Cari endpoint Accurate (baca)",
       description:
-        "Mencari endpoint API Accurate yang boleh dipanggil (hanya endpoint baca). " +
+        "Mencari endpoint API Accurate yang boleh dipanggil: baca (accurate_get) atau tulis tambah/ubah (accurate_write). " +
         "Tanpa argumen: daftar modul. Dengan 'query': pencarian kata kunci (Indonesia/Inggris). " +
         "Dengan 'path': parameter lengkap satu endpoint (mis. 'sales-invoice/list.do').",
       inputSchema: {
         query: z.string().max(200).optional().describe("Kata kunci, mis. 'faktur penjualan' atau 'stok'"),
         path: z.string().max(200).optional().describe("Path endpoint untuk melihat parameter lengkapnya"),
         limit: z.number().int().min(1).max(30).default(15).describe("Jumlah hasil maksimum"),
+        jenis: z.enum(["baca", "tulis", "semua"]).default("semua").describe("Saring endpoint baca atau tulis"),
       },
       annotations: READ_ONLY,
     },
-    async ({ query, path, limit }) => {
+    async ({ query, path, limit, jenis }) => {
       try {
         const catalog = await getCatalog();
+        const kind = jenis === "baca" ? "read" : jenis === "tulis" ? "write" : undefined;
         if (path) {
           const entry = catalog.get(normalizePath(path));
           if (!entry) throw new Error(`Endpoint '${path}' tidak ada di daftar endpoint baca.`);
           return ok(describeEndpoint(entry));
         }
-        if (!query) return ok({ jumlah_endpoint_baca: catalog.size, modul: listModules(catalog) });
-        return ok(searchCatalog(catalog, query, limit));
+        if (!query) {
+          const all = [...catalog.values()];
+          return ok({
+            jumlah_endpoint_baca: all.filter((e) => e.kind === "read").length,
+            jumlah_endpoint_tulis: all.filter((e) => e.kind === "write").length,
+            modul: listModules(catalog, kind),
+          });
+        }
+        return ok(searchCatalog(catalog, query, limit, kind));
       } catch (e) {
         return fail(e);
       }
@@ -247,7 +264,7 @@ function createMcpServer() {
       try {
         const { tenant: t, client } = tenants.resolve(tenant);
         const catalog = await getCatalog();
-        const norm = assertAllowed(path, catalog);
+        const norm = assertAllowed(path, catalog, "read");
         const q = sanitizeQuery(query);
         if (!(all_pages && norm.endsWith("/list.do"))) {
           const body = await client.api(norm, q);
@@ -274,6 +291,48 @@ function createMcpServer() {
     }
   );
 
+  server.registerTool(
+    "accurate_write",
+    {
+      title: "Tambah/ubah data di Accurate",
+      description:
+        "MENAMBAH atau MENGUBAH data asli di satu tenant Accurate (HTTP POST ke endpoint tulis, mis. 'vendor/save.do'). " +
+        "Hanya untuk tenant dengan boleh_tulis = true. Hapus data tidak diizinkan. Sertakan 'id' untuk mengubah data yang ada; " +
+        "tanpa 'id' akan membuat data baru. WAJIB tampilkan isinya ke pengguna dan dapatkan konfirmasi sebelum memanggil.",
+      inputSchema: {
+        tenant: tenantSchema,
+        path: z.string().max(200).describe("Path endpoint tulis, mis. 'vendor/save.do' (cari dengan search_endpoints jenis 'tulis')"),
+        body: z.record(z.unknown()).describe("Isi JSON sesuai field endpoint, mis. {\"name\":\"PT X\",\"transDate\":\"31/12/2025\"}"),
+        dikonfirmasi: z.boolean().describe("true HANYA bila pengguna sudah melihat isi ini dan menyetujuinya secara eksplisit"),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ tenant, path, body, dikonfirmasi }) => {
+      let t, norm;
+      try {
+        if (dikonfirmasi !== true) {
+          throw new Error("Belum dikonfirmasi. Tampilkan tenant, endpoint, dan isi yang akan dikirim ke pengguna, minta persetujuan, lalu panggil lagi dengan dikonfirmasi = true.");
+        }
+        const r = tenants.resolve(tenant);
+        t = r.tenant;
+        if (!t.allowWrite) {
+          throw new Error(`Tenant '${t.id}' hanya boleh dibaca. Izin tulis harus diaktifkan admin di halaman admin.`);
+        }
+        const catalog = await getCatalog();
+        norm = assertAllowed(path, catalog, "write");
+        const clean = sanitizeBody(body);
+        const result = await r.client.write(norm, clean);
+        const ref = result?.r ?? {};
+        const hasil = [ref.number, ref.id !== undefined ? `id ${ref.id}` : null].filter(Boolean).join(", ");
+        audit.log({ jenis: "tulis", tenant: t.id, path: norm, ok: true, hasil: hasil || undefined, body: clean });
+        return ok({ tenant: t.id, path: norm, ...result });
+      } catch (e) {
+        if (t && norm) audit.log({ jenis: "tulis", tenant: t.id, path: norm, ok: false, error: describeError(e).slice(0, 500), body });
+        return fail(e);
+      }
+    }
+  );
+
   return server;
 }
 
@@ -283,7 +342,7 @@ function createMcpServer() {
 if (STDIO) {
   const server = createMcpServer();
   await server.connect(new StdioServerTransport());
-  console.error("Accurate Multi-Tenant MCP (stdio, read-only) siap.");
+  console.error("Accurate Multi-Tenant MCP (stdio) siap. Halaman admin hanya tersedia di mode HTTP.");
 } else {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
@@ -324,6 +383,17 @@ if (STDIO) {
   app.delete("/mcp", methodNotAllowed);
 
   app.listen(Number(PORT), HOST, () => {
-    console.log(`Accurate Multi-Tenant MCP (read-only) berjalan di http://${HOST}:${PORT}/mcp`);
+    console.log(`Accurate Multi-Tenant MCP berjalan di http://${HOST}:${PORT}/mcp`);
+  });
+
+  // Halaman admin di port terpisah. Tanpa ADMIN_PASSWORD yang cukup kuat, admin tidak dijalankan.
+  let adminApp = null;
+  try {
+    adminApp = createAdminApp({ registry: tenants, audit, password: ADMIN_PASSWORD });
+  } catch (err) {
+    console.error(`Halaman admin TIDAK dijalankan: ${err.message}`);
+  }
+  adminApp?.listen(Number(ADMIN_PORT), ADMIN_HOST, () => {
+    console.log(`Halaman admin di http://${ADMIN_HOST}:${ADMIN_PORT}/admin`);
   });
 }

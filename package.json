@@ -1,7 +1,7 @@
 {
   "name": "accurate-multi-mcp",
-  "version": "1.0.0",
-  "description": "MCP server (read-only) multi-tenant untuk banyak database Accurate Online",
+  "version": "2.0.0",
+  "description": "MCP server multi-tenant untuk Accurate Online: baca semua tenant, tulis (tambah/ubah) per tenant, dengan halaman admin",
   "type": "module",
   "main": "server.js",
   "scripts": {

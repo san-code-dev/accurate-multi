@@ -47,5 +47,5 @@ Thumbs.db
 # Hasil paket ekstensi Claude Desktop
 extension/dist/
 
-# Daftar tenant berisi API token & secret Accurate (JANGAN di-commit)
-config/tenants.json
+# Tenant (API token & secret Accurate) dan audit log (JANGAN di-commit)
+data/
